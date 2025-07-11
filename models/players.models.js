@@ -309,88 +309,62 @@ function getFSRankEWInfo() {
 	});
 }
 
-// Novas funções para todos os jogadores
-function getAllRank1v1Info() {
-	return getAllPlayersProfileId().then((data) => {
-		const playersArray = data.map((player) =>
-			getPlayerInfo({ steam_id: player })
-		);
-
-		return Promise.all(playersArray).then((players) => {
-			let ranking = [];
-
-			players.forEach((player) => {
-				ranking.push({
-					nickname: player.nick,
-					country: player.country,
-					rating: player.rm1v1Stats.rating,
-					streak: player.rm1v1Stats.streak,
-					wins: player.rm1v1Stats.wins,
-					losses: player.rm1v1Stats.losses,
-					highestrating: player.rm1v1Stats.highestrating,
-				});
-			});
-
-			ranking = ranking.sort((a, b) => b.rating - a.rating);
-			return ranking;
-		});
-	});
+// Funções para ranking geral usando a API oficial do AoE2 DE
+async function getAllRank1v1Info() {
+  try {
+    const response = await axios.get('https://aoe-api.worldsedgelink.com/community/leaderboard/GetLeaderboard?title=age2&leaderboard_id=3&start=1&count=1000');
+    const data = response.data.leaderboard || [];
+    const ranking = data.map(player => ({
+      nickname: player.name || player.nickname || 'Unknown',
+      country: player.country || '',
+      rating: player.rating || 0,
+      streak: player.streak || 0,
+      wins: player.wins || 0,
+      losses: player.losses || 0,
+      highestrating: player.highestrating || player.rating || 0,
+    }));
+    return ranking;
+  } catch (err) {
+    return [];
+  }
 }
 
-function getAllRankTgInfo() {
-	return getAllPlayersProfileId().then((data) => {
-		const playersArray = data.map((player) =>
-			getPlayerInfo({ steam_id: player })
-		);
-
-		return Promise.all(playersArray).then((players) => {
-			let ranking = [];
-
-			players.forEach((player) => {
-				ranking.push({
-					nickname: player.nick,
-					country: player.country,
-					rating: player.rmTGStats.rating,
-					streak: player.rmTGStats.streak,
-					wins: player.rmTGStats.wins,
-					losses: player.rmTGStats.losses,
-					highestrating: player.rmTGStats.highestrating,
-				});
-			});
-
-			ranking = ranking.sort((a, b) => b.rating - a.rating);
-			return ranking;
-		});
-	});
+async function getAllRankTgInfo() {
+  try {
+    const response = await axios.get('https://aoe-api.worldsedgelink.com/community/leaderboard/GetLeaderboard?title=age2&leaderboard_id=13&start=1&count=1000');
+    const data = response.data.leaderboard || [];
+    const ranking = data.map(player => ({
+      nickname: player.name || player.nickname || 'Unknown',
+      country: player.country || '',
+      rating: player.rating || 0,
+      streak: player.streak || 0,
+      wins: player.wins || 0,
+      losses: player.losses || 0,
+      highestrating: player.highestrating || player.rating || 0,
+    }));
+    return ranking;
+  } catch (err) {
+    return [];
+  }
 }
 
-function getAllRankEWInfo() {
-	return getAllPlayersProfileId().then((data) => {
-		const playersArray = data.map((player) =>
-			getPlayerInfo({ steam_id: player })
-		);
-
-		return Promise.all(playersArray).then((players) => {
-			let ranking = [];
-
-			players.forEach((player) => {
-				if (player.rmEWStats.rating !== 0) {
-					ranking.push({
-						nickname: player.nick,
-						country: player.country,
-						rating: player.rmEWStats.rating,
-						streak: player.rmEWStats.streak,
-						wins: player.rmEWStats.wins,
-						losses: player.rmEWStats.losses,
-						highestrating: player.rmEWStats.highestrating,
-					});
-				}
-			});
-
-			ranking = ranking.sort((a, b) => b.rating - a.rating);
-			return ranking;
-		});
-	});
+async function getAllRankEWInfo() {
+  try {
+    const response = await axios.get('https://aoe-api.worldsedgelink.com/community/leaderboard/GetLeaderboard?title=age2&leaderboard_id=4&start=1&count=1000');
+    const data = response.data.leaderboard || [];
+    const ranking = data.map(player => ({
+      nickname: player.name || player.nickname || 'Unknown',
+      country: player.country || '',
+      rating: player.rating || 0,
+      streak: player.streak || 0,
+      wins: player.wins || 0,
+      losses: player.losses || 0,
+      highestrating: player.highestrating || player.rating || 0,
+    }));
+    return ranking;
+  } catch (err) {
+    return [];
+  }
 }
 
 module.exports = {

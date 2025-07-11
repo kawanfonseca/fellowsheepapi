@@ -21,6 +21,9 @@ app.use(cors());
 
 app.use(logger);
 
+// Rota raiz para verificar se a API está funcionando
+app.get("/", getStatus);
+
 app.get("/api", getStatus);
 
 app.get("/api/player", getPlayer);
@@ -39,5 +42,13 @@ app.get("/api/rankAll1v1", getAllRank1v1);
 app.get("/api/rankAllTg", getAllRankTg);
 
 app.get("/api/rankAllEw", getAllRankEw);
+
+// Para desenvolvimento local
+if (process.env.NODE_ENV !== 'production') {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
 
 module.exports = app;

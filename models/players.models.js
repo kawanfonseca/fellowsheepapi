@@ -11,11 +11,16 @@ const fs = require("fs");
 
 function getFSPlayersProfileId() {
 	return new Promise(function (resolve, reject) {
-		fs.readFile("./database/fs_steam_ids.txt", "utf-8", (err, players) => {
+		// Usar path.join para compatibilidade com diferentes sistemas
+		const path = require('path');
+		const filePath = path.join(__dirname, '../database/fs_steam_ids.txt');
+		
+		fs.readFile(filePath, "utf-8", (err, players) => {
 			if (err) {
+				console.error('Erro ao ler fs_steam_ids.txt:', err);
 				reject(err);
 			} else {
-				const data = players.split("\n");
+				const data = players.split("\n").filter(line => line.trim() !== '');
 				resolve(data);
 			}
 		});
@@ -24,11 +29,16 @@ function getFSPlayersProfileId() {
 
 function getAllPlayersProfileId() {
 	return new Promise(function (resolve, reject) {
-		fs.readFile("./database/players.txt", "utf-8", (err, players) => {
+		// Usar path.join para compatibilidade com diferentes sistemas
+		const path = require('path');
+		const filePath = path.join(__dirname, '../database/players.txt');
+		
+		fs.readFile(filePath, "utf-8", (err, players) => {
 			if (err) {
+				console.error('Erro ao ler players.txt:', err);
 				reject(err);
 			} else {
-				const data = players.split("\n");
+				const data = players.split("\n").filter(line => line.trim() !== '');
 				resolve(data);
 			}
 		});

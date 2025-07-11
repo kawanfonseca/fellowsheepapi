@@ -312,7 +312,7 @@ function getFSRankEWInfo() {
 // Funções para ranking geral usando a API oficial do AoE2 DE
 async function getAllRank1v1Info() {
   try {
-    const response = await axios.get('https://aoe-api.worldsedgelink.com/community/leaderboard/GetLeaderboard?title=age2&leaderboard_id=3&start=1&count=1000');
+    const response = await axios.get('https://aoe-api.worldsedgelink.com/community/leaderboard/getLeaderBoard2?title=age2&leaderboard_id=3&platform=PC_STEAM&start=1&count=200&sortBy=1');
     const data = response.data.leaderboard || [];
     const ranking = data.map(player => ({
       nickname: player.name || player.nickname || 'Unknown',
@@ -331,7 +331,7 @@ async function getAllRank1v1Info() {
 
 async function getAllRankTgInfo() {
   try {
-    const response = await axios.get('https://aoe-api.worldsedgelink.com/community/leaderboard/GetLeaderboard?title=age2&leaderboard_id=13&start=1&count=1000');
+    const response = await axios.get('https://aoe-api.worldsedgelink.com/community/leaderboard/getLeaderBoard2?title=age2&leaderboard_id=13&platform=PC_STEAM&start=1&count=200&sortBy=1');
     const data = response.data.leaderboard || [];
     const ranking = data.map(player => ({
       nickname: player.name || player.nickname || 'Unknown',
@@ -350,7 +350,7 @@ async function getAllRankTgInfo() {
 
 async function getAllRankEWInfo() {
   try {
-    const response = await axios.get('https://aoe-api.worldsedgelink.com/community/leaderboard/GetLeaderboard?title=age2&leaderboard_id=4&start=1&count=1000');
+    const response = await axios.get('https://aoe-api.worldsedgelink.com/community/leaderboard/getLeaderBoard2?title=age2&leaderboard_id=4&platform=PC_STEAM&start=1&count=200&sortBy=1');
     const data = response.data.leaderboard || [];
     const ranking = data.map(player => ({
       nickname: player.name || player.nickname || 'Unknown',

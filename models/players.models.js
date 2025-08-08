@@ -321,12 +321,12 @@ function getFSRankEWInfo() {
 	});
 }
 
-// Funções para ranking geral usando a API oficial do AoE2 DE
+// Funções para ranking geral usando a API do AOE2 Companion
 async function getAllRank1v1Info() {
   try {
-    const response = await axios.get('https://aoe-api.worldsedgelink.com/community/leaderboard/getLeaderBoard2?title=age2&leaderboard_id=3&platform=PC_STEAM&start=1&count=200&sortBy=1');
-    const data = response.data.leaderboard || [];
-    const ranking = data.map(player => ({
+    const response = await axios.get('https://data.aoe2companion.com/api/leaderboards/rm_1v1?direction=forward&search=&page=1');
+    const data = Array.isArray(response.data.players) ? response.data.players : [];
+    const ranking = data.map((player) => ({
       nickname: player.name || player.nickname || 'Unknown',
       country: player.country || '',
       rating: player.rating || 0,
@@ -343,9 +343,9 @@ async function getAllRank1v1Info() {
 
 async function getAllRankTgInfo() {
   try {
-    const response = await axios.get('https://aoe-api.worldsedgelink.com/community/leaderboard/getLeaderBoard2?title=age2&leaderboard_id=13&platform=PC_STEAM&start=1&count=200&sortBy=1');
-    const data = response.data.leaderboard || [];
-    const ranking = data.map(player => ({
+    const response = await axios.get('https://data.aoe2companion.com/api/leaderboards/rm_team?direction=forward&search=&page=1');
+    const data = Array.isArray(response.data.players) ? response.data.players : [];
+    const ranking = data.map((player) => ({
       nickname: player.name || player.nickname || 'Unknown',
       country: player.country || '',
       rating: player.rating || 0,
@@ -362,9 +362,9 @@ async function getAllRankTgInfo() {
 
 async function getAllRankEWInfo() {
   try {
-    const response = await axios.get('https://aoe-api.worldsedgelink.com/community/leaderboard/getLeaderBoard2?title=age2&leaderboard_id=4&platform=PC_STEAM&start=1&count=200&sortBy=1');
-    const data = response.data.leaderboard || [];
-    const ranking = data.map(player => ({
+    const response = await axios.get('https://data.aoe2companion.com/api/leaderboards/ew_1v1?direction=forward&search=&page=1');
+    const data = Array.isArray(response.data.players) ? response.data.players : [];
+    const ranking = data.map((player) => ({
       nickname: player.name || player.nickname || 'Unknown',
       country: player.country || '',
       rating: player.rating || 0,

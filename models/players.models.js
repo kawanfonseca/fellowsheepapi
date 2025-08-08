@@ -333,6 +333,8 @@ async function getAllRank1v1Info() {
       streak: player.streak || 0,
       wins: player.wins || 0,
       losses: player.losses || 0,
+      rank: player.rank || null,
+      games: (player.wins || 0) + (player.losses || 0),
       highestrating: player.highestrating || player.rating || 0,
     }));
     return ranking;
@@ -352,6 +354,8 @@ async function getAllRankTgInfo() {
       streak: player.streak || 0,
       wins: player.wins || 0,
       losses: player.losses || 0,
+      rank: player.rank || null,
+      games: (player.wins || 0) + (player.losses || 0),
       highestrating: player.highestrating || player.rating || 0,
     }));
     return ranking;
@@ -371,6 +375,8 @@ async function getAllRankEWInfo() {
       streak: player.streak || 0,
       wins: player.wins || 0,
       losses: player.losses || 0,
+      rank: player.rank || null,
+      games: (player.wins || 0) + (player.losses || 0),
       highestrating: player.highestrating || player.rating || 0,
     }));
     return ranking;

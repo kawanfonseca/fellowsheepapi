@@ -10,21 +10,32 @@ infoRequest = rateLimit(axios.create(), {
 const fs = require("fs");
 
 function getFSPlayersProfileId() {
-	return new Promise(function (resolve, reject) {
-		// Usar path.join para compatibilidade com diferentes sistemas
-		const path = require('path');
-		const filePath = path.join(__dirname, '../database/fs_steam_ids.txt');
-		
-		fs.readFile(filePath, "utf-8", (err, players) => {
-			if (err) {
-				console.error('Erro ao ler fs_steam_ids.txt:', err);
-				reject(err);
-			} else {
-				const data = players.split("\n").filter(line => line.trim() !== '');
-				resolve(data);
-			}
-		});
-	});
+    return new Promise(function (resolve, reject) {
+        // Ler da lista JSON oficial dos jogadores do clã
+        const path = require('path');
+        const filePath = path.join(__dirname, '../database/fs_players.json');
+
+        fs.readFile(filePath, 'utf-8', (err, fileContent) => {
+            if (err) {
+                console.error('Erro ao ler fs_players.json:', err);
+                reject(err);
+                return;
+            }
+
+            try {
+                const players = JSON.parse(fileContent);
+                // Extrair apenas SteamIDs numéricos válidos, pois o endpoint usa profile_names="/steam/<steamid64>"
+                const steamIdList = players
+                    .map((p) => (p && p.steam ? String(p.steam).trim() : ''))
+                    .filter((steam) => /^\d+$/.test(steam));
+
+                resolve(steamIdList);
+            } catch (parseErr) {
+                console.error('Erro ao parsear fs_players.json:', parseErr);
+                reject(parseErr);
+            }
+        });
+    });
 }
 
 function getAllPlayersProfileId() {
@@ -49,18 +60,19 @@ function getPlayerInfo(player) {
 	const playerInfoUrl = `https://aoe-api.worldsedgelink.com/community/leaderboard/GetPersonalStat?title=age2`;
 	let parameters = {};
 
-	if (player.hasOwnProperty("profile_id")) {
-		parameters = {
-			profile_ids: `[${player.profile_id}]`,
-		};
-	} else if (player.hasOwnProperty("steam_id")) {
-		parameters = {
-			profile_names: `["/steam/${player.steam_id}"]`,
-		};
-	} else
-		parameters = {
-			aliases: `[${player.nickname}]`,
-		};
+    if (player.hasOwnProperty("profile_id")) {
+        parameters = {
+            profile_ids: `[${player.profile_id}]`,
+        };
+    } else if (player.hasOwnProperty("steam_id")) {
+        parameters = {
+            profile_names: JSON.stringify([`/steam/${player.steam_id}`]),
+        };
+    } else {
+        parameters = {
+            aliases: JSON.stringify([player.nickname]),
+        };
+    }
 
 	return new Promise(function (resolve, reject) {
 		infoRequest({

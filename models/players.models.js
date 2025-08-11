@@ -101,20 +101,26 @@ async function fetchRecentMatchForPlayer({ steam, id }) {
     // Algumas rotas aceitam profile_ids, usar como fallback
     params.profile_ids = JSON.stringify([Number(id)]);
   } else {
-    return null;
+    return [];
   }
 
   const resp = await historyRequest.get(url, { params, timeout: 10000 });
   const data = resp.data || {};
   const list = Array.isArray(data.matchHistoryStats) ? data.matchHistoryStats : [];
-  return list.length > 0 ? list[0] : null;
+  return list;
 }
 
 // Detecta se a partida está em andamento: sem completiontime
 function isMatchLive(match) {
   if (!match) return false;
   // Considerar sem completiontime ou completiontime = 0 como "ao vivo"
-  return !("completiontime" in match) || !match.completiontime;
+  const comp = Number(match.completiontime || 0);
+  const start = Number(match.startgametime || 0);
+  if (!comp) return true;
+  // Às vezes completiontime pode vir 0 mas start indica passado recente
+  // Se a partida começou nos últimos 90 minutos, considerar ao vivo
+  const nowSec = Math.floor(Date.now() / 1000);
+  return start && (nowSec - start) < (90 * 60);
 }
 
 // Mapeamento básico de tipos de partida
@@ -530,49 +536,60 @@ async function getFsLiveLeaderboardInfo({ leaderboardId = 3, start = 1, count = 
 async function getFsLiveMatchesInfo() {
   try {
     const fsPlayers = await loadFsPlayers();
-    const results = await Promise.allSettled(
-      fsPlayers.map((p) => fetchRecentMatchForPlayer({ steam: p.steam, id: p.id }))
-    );
+    // Limitar concorrência para evitar timeouts no serverless
+    const chunkSize = 10;
+    const allMatches = [];
+    for (let i = 0; i < fsPlayers.length; i += chunkSize) {
+      const slice = fsPlayers.slice(i, i + chunkSize);
+      const results = await Promise.allSettled(
+        slice.map((p) => fetchRecentMatchForPlayer({ steam: p.steam, id: p.id }))
+      );
+      results.forEach((res) => {
+        if (res.status === 'fulfilled' && Array.isArray(res.value)) {
+          allMatches.push(...res.value);
+        }
+      });
+    }
 
+    const idToNick = new Map(
+      fsPlayers.map(fp => [Number(fp.id), fp.nick])
+    );
+    const fsIdSet = new Set(fsPlayers.map(fp => Number(fp.id)));
     const matchesById = new Map();
 
-    results.forEach((res, idx) => {
-      if (res.status !== 'fulfilled') return;
-      const match = res.value;
+    allMatches.forEach((match) => {
       if (!isMatchLive(match)) return;
-
       const matchId = match.id || match.matchhistory_id;
       if (!matchId) return;
+      if (matchesById.has(matchId)) return;
 
-      // Montar informação básica
-      if (!matchesById.has(matchId)) {
-        const members = Array.isArray(match.matchhistorymember) ? match.matchhistorymember : [];
-        const team0 = members.filter(m => m.teamid === 0).map(m => ({ profile_id: m.profile_id }));
-        const team1 = members.filter(m => m.teamid === 1).map(m => ({ profile_id: m.profile_id }));
+      const members = Array.isArray(match.matchhistorymember) ? match.matchhistorymember : [];
+      const team0 = members.filter(m => m.teamid === 0).map(m => ({ profile_id: m.profile_id }));
+      const team1 = members.filter(m => m.teamid === 1).map(m => ({ profile_id: m.profile_id }));
 
-        // Decorar nomes para membros FS a partir do arquivo local
-        const idToNick = new Map(fsPlayers.map(fp => [Number(fp.id), fp.nick]));
-        const decorate = (player) => ({
-          profile_id: Number(player.profile_id),
-          name: idToNick.get(Number(player.profile_id)) || String(player.profile_id),
-          is_fs: idToNick.has(Number(player.profile_id)),
-        });
+      // Garantir que pelo menos um membro FS esteja nesta partida
+      const hasFs = [...team0, ...team1].some(p => fsIdSet.has(Number(p.profile_id)));
+      if (!hasFs) return;
 
-        const gameType = MATCH_TYPE_MAP[match.matchtype_id] || 'Ranked';
+      const decorate = (player) => ({
+        profile_id: Number(player.profile_id),
+        name: idToNick.get(Number(player.profile_id)) || String(player.profile_id),
+        is_fs: idToNick.has(Number(player.profile_id)),
+      });
 
-        matchesById.set(matchId, {
-          id: matchId,
-          mapname: match.mapname || 'Unknown',
-          matchtype_id: match.matchtype_id,
-          gameType,
-          startgametime: match.startgametime || 0,
-          observertotal: match.observertotal || 0,
-          teams: {
-            team0: team0.map(decorate),
-            team1: team1.map(decorate),
-          },
-        });
-      }
+      const gameType = MATCH_TYPE_MAP[match.matchtype_id] || 'Ranked';
+      matchesById.set(matchId, {
+        id: matchId,
+        mapname: match.mapname || 'Unknown',
+        matchtype_id: match.matchtype_id,
+        gameType,
+        startgametime: match.startgametime || 0,
+        observertotal: match.observertotal || 0,
+        teams: {
+          team0: team0.map(decorate),
+          team1: team1.map(decorate),
+        },
+      });
     });
 
     return Array.from(matchesById.values());

@@ -14,6 +14,7 @@ const historyRequest = rateLimit(axios.create(), {
 });
 
 const fs = require("fs");
+const zlib = require('zlib');
 // Cache em memória para aliases resolvidos por profile_id
 const aliasCacheByProfileId = new Map();
 
@@ -185,6 +186,81 @@ const MATCH_TYPE_MAP = {
   9: '1v1 Empire Wars',
   10: 'Team Empire Wars',
 };
+
+// Normalização de nomes de mapas (RMS/script -> nome amigável)
+const MAP_NAME_NORMALIZATION = new Map([
+  ['arabia.rms', 'Arabia'],
+  ['arena.rms', 'Arena'],
+  ['enclosed.rms', 'Enclosed'],
+  ['socotra.rms', 'Socotra'],
+  ['mediterranean.rms', 'Mediterranean'],
+  ['fortress.rms', 'Fortress'],
+  ['gold_rush.rms', 'Gold Rush'],
+  ['acropolis.rms', 'Acropolis'],
+  ['four_lakes.rms', 'Four Lakes'],
+  ['islands.rms', 'Islands'],
+  ['ghost_lake.rms', 'Ghost Lake'],
+  ['oasis.rms', 'Oasis'],
+  ['highland.rms', 'Highland'],
+  ['valley.rms', 'Valley'],
+  ['cross.rms', 'Cross'],
+]);
+
+function normalizeMapName(rawName, decodedOptions) {
+  // Tentar via options primeiro
+  if (decodedOptions && typeof decodedOptions === 'object') {
+    const o = decodedOptions;
+    const fromKeys = [
+      'map', 'selectedmap', 'mapname', 'map_name', 'random_map', 'randommap'
+    ];
+    for (const k of fromKeys) {
+      const v = o[k];
+      if (typeof v === 'string' && v.trim()) {
+        const key = v.trim().toLowerCase();
+        if (MAP_NAME_NORMALIZATION.has(key)) return MAP_NAME_NORMALIZATION.get(key);
+        // Se já vier amigável
+        return v.replace(/\.rms$/i, '');
+      }
+    }
+  }
+
+  if (typeof rawName === 'string' && rawName.trim()) {
+    const key = rawName.trim().toLowerCase();
+    if (MAP_NAME_NORMALIZATION.has(key)) return MAP_NAME_NORMALIZATION.get(key);
+    return rawName.replace(/\.rms$/i, '');
+  }
+  return 'Ranked';
+}
+
+function decodeOptionsCompressed(optionsStr) {
+  if (!optionsStr || typeof optionsStr !== 'string') return null;
+  try {
+    const buff = Buffer.from(optionsStr, 'base64');
+    // Tentar inflate com cabeçalho zlib
+    let inflated;
+    try {
+      inflated = zlib.inflateSync(buff);
+    } catch (_) {
+      inflated = zlib.inflateRawSync(buff);
+    }
+    const text = inflated.toString('utf-8');
+    // Tentar JSON direto
+    try {
+      return JSON.parse(text);
+    } catch (_) {
+      // fallback: tentar extrair pares chave:valor simples
+      const obj = {};
+      const pairs = text.match(/\b([A-Za-z0-9_]+)\s*[:=]\s*"?([^",\n\r]+)"?/g) || [];
+      for (const p of pairs) {
+        const m = p.match(/\b([A-Za-z0-9_]+)\s*[:=]\s*"?([^",\n\r]+)"?/);
+        if (m) obj[m[1]] = m[2];
+      }
+      return obj;
+    }
+  } catch (_) {
+    return null;
+  }
+}
 
 function getAllPlayersProfileId() {
 	return new Promise(function (resolve, reject) {
@@ -647,10 +723,20 @@ async function getFsLiveMatchesInfo() {
         };
       };
 
-      const gameType = MATCH_TYPE_MAP[match.matchtype_id] || 'Ranked';
+      // Decodificar options para melhorar detecção de mapa e modo
+      const decodedOptions = decodeOptionsCompressed(match.options);
+      const mapname = normalizeMapName(match.mapname, decodedOptions);
+
+      // Determinar modo com base em matchtype_id e tamanho dos times
+      const isEmpire = match.matchtype_id === 9 || match.matchtype_id === 10 ||
+        (decodedOptions && /empire/i.test(JSON.stringify(decodedOptions)));
+      const is1v1 = (team0.length === 1 && team1.length === 1);
+      const gameType = isEmpire
+        ? (is1v1 ? '1v1 Empire Wars' : 'Team Empire Wars')
+        : (is1v1 ? '1v1 Random Map' : 'Team Random Map');
       matchesById.set(matchId, {
         id: matchId,
-        mapname: match.mapname || 'Unknown',
+        mapname,
         matchtype_id: match.matchtype_id,
         gameType,
         startgametime: match.startgametime || 0,

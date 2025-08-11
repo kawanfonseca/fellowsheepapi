@@ -14,6 +14,30 @@ const historyRequest = rateLimit(axios.create(), {
 });
 
 const fs = require("fs");
+// Cache em memória para aliases resolvidos por profile_id
+const aliasCacheByProfileId = new Map();
+
+async function fetchAliasForProfileId(profileId) {
+  const pid = Number(profileId);
+  if (!Number.isFinite(pid)) return null;
+  if (aliasCacheByProfileId.has(pid)) return aliasCacheByProfileId.get(pid);
+
+  try {
+    const url = 'https://aoe-api.worldsedgelink.com/community/leaderboard/GetPersonalStat';
+    const params = {
+      title: 'age2',
+      profile_ids: JSON.stringify([pid]),
+    };
+    const resp = await infoRequest.get(url, { params, timeout: 10000 });
+    const data = resp.data || {};
+    const alias = data?.statGroups?.[0]?.members?.[0]?.alias || null;
+    if (alias) aliasCacheByProfileId.set(pid, String(alias));
+    return alias;
+  } catch (_) {
+    return null;
+  }
+}
+
 
 function getFSPlayersProfileId() {
     return new Promise(function (resolve, reject) {
@@ -91,6 +115,36 @@ async function loadFsPlayers() {
   });
 }
 
+// Extrair aliases a partir do payload do recentMatchHistory
+function extractAliasesFromHistoryPayload(payload) {
+  const aliasById = new Map();
+  if (!payload || typeof payload !== 'object') return aliasById;
+  const scanArray = (arr) => {
+    if (!Array.isArray(arr)) return;
+    for (const item of arr) {
+      if (item && typeof item === 'object') {
+        const pid = Number(item.profile_id || item.profileId || item.profileid);
+        const alias = item.alias || item.name || '';
+        if (Number.isFinite(pid) && alias && !aliasById.has(pid)) {
+          aliasById.set(pid, String(alias));
+        }
+      }
+    }
+  };
+  // Chaves comuns observadas na resposta
+  scanArray(payload.profiles);
+  scanArray(payload.profile);
+  // Varrer todas as chaves de arrays para garantir abrangência
+  for (const key of Object.keys(payload)) {
+    try {
+      scanArray(payload[key]);
+    } catch (_) {
+      // ignore
+    }
+  }
+  return aliasById;
+}
+
 // Buscar histórico recente para um jogador (via steam ou profile_id)
 async function fetchRecentMatchForPlayer({ steam, id }) {
   const url = 'https://aoe-api.worldsedgelink.com/community/leaderboard/getRecentMatchHistory';
@@ -101,13 +155,14 @@ async function fetchRecentMatchForPlayer({ steam, id }) {
     // Algumas rotas aceitam profile_ids, usar como fallback
     params.profile_ids = JSON.stringify([Number(id)]);
   } else {
-    return [];
+    return { matches: [], aliases: new Map() };
   }
 
   const resp = await historyRequest.get(url, { params, timeout: 10000 });
   const data = resp.data || {};
   const list = Array.isArray(data.matchHistoryStats) ? data.matchHistoryStats : [];
-  return list;
+  const aliases = extractAliasesFromHistoryPayload(data);
+  return { matches: list, aliases };
 }
 
 // Detecta se a partida está em andamento: sem completiontime
@@ -539,14 +594,21 @@ async function getFsLiveMatchesInfo() {
     // Limitar concorrência para evitar timeouts no serverless
     const chunkSize = 10;
     const allMatches = [];
+    const globalAliases = new Map();
     for (let i = 0; i < fsPlayers.length; i += chunkSize) {
       const slice = fsPlayers.slice(i, i + chunkSize);
       const results = await Promise.allSettled(
         slice.map((p) => fetchRecentMatchForPlayer({ steam: p.steam, id: p.id }))
       );
       results.forEach((res) => {
-        if (res.status === 'fulfilled' && Array.isArray(res.value)) {
-          allMatches.push(...res.value);
+        if (res.status === 'fulfilled' && res.value) {
+          const { matches, aliases } = res.value;
+          if (Array.isArray(matches)) allMatches.push(...matches);
+          if (aliases && typeof aliases.forEach === 'function') {
+            aliases.forEach((alias, pid) => {
+              if (!globalAliases.has(pid)) globalAliases.set(pid, alias);
+            });
+          }
         }
       });
     }
@@ -556,6 +618,7 @@ async function getFsLiveMatchesInfo() {
     );
     const fsIdSet = new Set(fsPlayers.map(fp => Number(fp.id)));
     const matchesById = new Map();
+    const unresolvedProfileIds = new Set();
 
     allMatches.forEach((match) => {
       if (!isMatchLive(match)) return;
@@ -571,11 +634,18 @@ async function getFsLiveMatchesInfo() {
       const hasFs = [...team0, ...team1].some(p => fsIdSet.has(Number(p.profile_id)));
       if (!hasFs) return;
 
-      const decorate = (player) => ({
-        profile_id: Number(player.profile_id),
-        name: idToNick.get(Number(player.profile_id)) || String(player.profile_id),
-        is_fs: idToNick.has(Number(player.profile_id)),
-      });
+      const decorate = (player) => {
+        const pid = Number(player.profile_id);
+        const fromFs = idToNick.get(pid);
+        const fromHistory = globalAliases.get(pid);
+        const name = fromFs || fromHistory || String(pid);
+        if (!fromFs && !fromHistory) unresolvedProfileIds.add(pid);
+        return {
+          profile_id: pid,
+          name,
+          is_fs: idToNick.has(pid),
+        };
+      };
 
       const gameType = MATCH_TYPE_MAP[match.matchtype_id] || 'Ranked';
       matchesById.set(matchId, {
@@ -592,7 +662,39 @@ async function getFsLiveMatchesInfo() {
       });
     });
 
-    return Array.from(matchesById.values());
+    // Resolver aliases pendentes via GetPersonalStat em lote (concorrência limitada)
+    const unresolvedList = Array.from(unresolvedProfileIds).slice(0, 100);
+    const concurrency = 8;
+    for (let i = 0; i < unresolvedList.length; i += concurrency) {
+      const batch = unresolvedList.slice(i, i + concurrency);
+      // eslint-disable-next-line no-await-in-loop
+      const aliases = await Promise.all(batch.map((pid) => fetchAliasForProfileId(pid)));
+      aliases.forEach((alias, idx) => {
+        const pid = batch[idx];
+        if (alias) aliasCacheByProfileId.set(pid, alias);
+      });
+    }
+
+    // Aplicar aliases resolvidos aos matches
+    const result = Array.from(matchesById.values()).map((m) => {
+      const replaceName = (p) => {
+        if (p.is_fs) return p;
+        const alias = aliasCacheByProfileId.get(p.profile_id);
+        if (alias && String(p.name) === String(p.profile_id)) {
+          return { ...p, name: alias };
+        }
+        return p;
+      };
+      return {
+        ...m,
+        teams: {
+          team0: (m.teams?.team0 || []).map(replaceName),
+          team1: (m.teams?.team1 || []).map(replaceName),
+        },
+      };
+    });
+
+    return result;
   } catch (err) {
     return [];
   }

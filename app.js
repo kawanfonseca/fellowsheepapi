@@ -17,6 +17,7 @@ const {
   getFsLiveMatches,
 } = require("./controllers/players.controller");
 const { getTwitchStreams, getYouTubeStreams, getAllStreams } = require('./models/streams.models');
+const { getFsRecentMatchesInfo } = require('./models/players.models');
 
 app.use(express.json());
 
@@ -51,6 +52,16 @@ app.get("/api/liveFs1v1", getFsLiveLeaderboard);
 
 // Novo endpoint: partidas em andamento dos membros FS (composição dos times)
 app.get("/api/liveFsMatches", getFsLiveMatches);
+
+// Partidas recentes
+app.get('/api/recentFsMatches', async (req, res) => {
+  try {
+    const data = await getFsRecentMatchesInfo();
+    res.status(200).json(data);
+  } catch (_) {
+    res.status(200).json([]);
+  }
+});
 
 // Endpoints de streams
 app.get('/api/streams/twitch', async (req, res) => {

@@ -169,14 +169,26 @@ async function fetchRecentMatchForPlayer({ steam, id }) {
 // Detecta se a partida está em andamento: sem completiontime
 function isMatchLive(match) {
   if (!match) return false;
-  // Considerar sem completiontime ou completiontime = 0 como "ao vivo"
+  // Considerar "ao vivo" apenas se não houver completiontime e dentro de janela razoável
   const comp = Number(match.completiontime || 0);
   const start = Number(match.startgametime || 0);
-  if (!comp) return true;
-  // Às vezes completiontime pode vir 0 mas start indica passado recente
-  // Se a partida começou nos últimos 90 minutos, considerar ao vivo
+  if (comp && comp > 0) return false;
   const nowSec = Math.floor(Date.now() / 1000);
-  return start && (nowSec - start) < (90 * 60);
+  const startedAgo = start ? (nowSec - start) : Infinity;
+  // 3 horas de janela para evitar partidas antigas sem completion
+  return startedAgo >= 0 && startedAgo < (3 * 60 * 60);
+}
+
+function isMatchRecent(match) {
+  if (!match) return false;
+  const comp = Number(match.completiontime || 0);
+  const start = Number(match.startgametime || 0);
+  if (!comp || comp <= 0) return false;
+  const end = comp;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const endedAgo = nowSec - end;
+  // Considerar recentes as dos últimos 3h
+  return endedAgo >= 0 && endedAgo < (3 * 60 * 60) && start > 0;
 }
 
 // Mapeamento básico de tipos de partida
@@ -797,11 +809,14 @@ async function getFsLiveMatchesInfo() {
         }
         return p;
       };
+      // Enriquecer com ratings atuais (1v1 RM) de cada jogador via GetPersonalStat
+      const team0 = m.teams?.team0 || [];
+      const team1 = m.teams?.team1 || [];
       return {
         ...m,
         teams: {
-          team0: (m.teams?.team0 || []).map(replaceName),
-          team1: (m.teams?.team1 || []).map(replaceName),
+          team0: team0.map(replaceName),
+          team1: team1.map(replaceName),
         },
       };
     });
@@ -822,6 +837,216 @@ async function getFsLiveMatchesInfo() {
       return m;
     });
 
+    // Buscar ratings (1v1 RM leaderboard_id=3) para enriquecer nomes com ELO: concorrência limitada
+    const collectIds = new Set();
+    result.forEach((m) => {
+      (m.teams?.team0 || []).forEach((p) => collectIds.add(p.profile_id));
+      (m.teams?.team1 || []).forEach((p) => collectIds.add(p.profile_id));
+    });
+
+    const ids = Array.from(collectIds).slice(0, 80); // limite
+    const ratingsById = new Map();
+    const chunk = 8;
+    for (let i = 0; i < ids.length; i += chunk) {
+      const batch = ids.slice(i, i + chunk);
+      // eslint-disable-next-line no-await-in-loop
+      const stats = await Promise.all(batch.map(async (pid) => {
+        const s = await getPlayerInfo({ profile_id: pid }).catch(() => null);
+        if (!s) return null;
+        return { pid, rating: s?.rm1v1Stats?.rating || 0 };
+      }));
+      stats.forEach((s) => {
+        if (s) ratingsById.set(s.pid, s.rating);
+      });
+    }
+
+    // Aplicar sufixo (ELO) ao lado do nome
+    result = result.map((m) => {
+      const applyElo = (p) => {
+        const rating = ratingsById.get(p.profile_id);
+        if (rating && rating > 0) return { ...p, name: `${p.name} (${rating})` };
+        return p;
+      };
+      return {
+        ...m,
+        teams: {
+          team0: (m.teams?.team0 || []).map(applyElo),
+          team1: (m.teams?.team1 || []).map(applyElo),
+        },
+      };
+    });
+
+    return result;
+  } catch (err) {
+    return [];
+  }
+}
+
+// Agrega partidas recentes (finalizadas) dos membros do clã (via recentMatchHistory)
+async function getFsRecentMatchesInfo() {
+  try {
+    const fsPlayers = await loadFsPlayers();
+    const chunkSize = 10;
+    const allMatches = [];
+    const globalAliases = new Map();
+    for (let i = 0; i < fsPlayers.length; i += chunkSize) {
+      const slice = fsPlayers.slice(i, i + chunkSize);
+      const results = await Promise.allSettled(
+        slice.map((p) => fetchRecentMatchForPlayer({ steam: p.steam, id: p.id }))
+      );
+      results.forEach((res) => {
+        if (res.status === 'fulfilled' && res.value) {
+          const { matches, aliases } = res.value;
+          if (Array.isArray(matches)) allMatches.push(...matches);
+          if (aliases && typeof aliases.forEach === 'function') {
+            aliases.forEach((alias, pid) => {
+              if (!globalAliases.has(pid)) globalAliases.set(pid, alias);
+            });
+          }
+        }
+      });
+    }
+
+    const idToNick = new Map(
+      fsPlayers.map(fp => [Number(fp.id), fp.nick])
+    );
+    const fsIdSet = new Set(fsPlayers.map(fp => Number(fp.id)));
+    const matchesById = new Map();
+    const unresolvedProfileIds = new Set();
+
+    allMatches.forEach((match) => {
+      if (!isMatchRecent(match)) return;
+      const matchId = match.id || match.matchhistory_id;
+      if (!matchId) return;
+      if (matchesById.has(matchId)) return;
+
+      const members = Array.isArray(match.matchhistorymember) ? match.matchhistorymember : [];
+      const team0 = members.filter(m => m.teamid === 0).map(m => ({ profile_id: m.profile_id }));
+      const team1 = members.filter(m => m.teamid === 1).map(m => ({ profile_id: m.profile_id }));
+
+      const hasFs = [...team0, ...team1].some(p => fsIdSet.has(Number(p.profile_id)));
+      if (!hasFs) return;
+
+      const decorate = (player) => {
+        const pid = Number(player.profile_id);
+        const fromFs = idToNick.get(pid);
+        const fromHistory = globalAliases.get(pid);
+        const name = fromFs || fromHistory || String(pid);
+        if (!fromFs && !fromHistory) unresolvedProfileIds.add(pid);
+        return {
+          profile_id: pid,
+          name,
+          is_fs: idToNick.has(pid),
+        };
+      };
+
+      const decodedOptions = decodeOptionsCompressed(match.options);
+      const mapname = normalizeMapName(match.mapname, decodedOptions);
+      const isEmpire = match.matchtype_id === 9 || match.matchtype_id === 10 ||
+        (decodedOptions && /empire/i.test(JSON.stringify(decodedOptions)));
+      const is1v1 = (team0.length === 1 && team1.length === 1);
+      const gameType = is1v1
+        ? (isEmpire ? '1v1 Empire Wars' : '1v1 Random Map')
+        : (isEmpire ? 'Team Random Map' : 'Team Empire Wars');
+
+      matchesById.set(matchId, {
+        id: matchId,
+        mapname,
+        matchtype_id: match.matchtype_id,
+        gameType,
+        startgametime: match.startgametime || 0,
+        completiontime: match.completiontime || 0,
+        observertotal: match.observertotal || 0,
+        teams: {
+          team0: team0.map(decorate),
+          team1: team1.map(decorate),
+        },
+      });
+    });
+
+    const unresolvedList = Array.from(unresolvedProfileIds).slice(0, 100);
+    const concurrency = 8;
+    for (let i = 0; i < unresolvedList.length; i += concurrency) {
+      const batch = unresolvedList.slice(i, i + concurrency);
+      // eslint-disable-next-line no-await-in-loop
+      const aliases = await Promise.all(batch.map((pid) => fetchAliasForProfileId(pid)));
+      aliases.forEach((alias, idx) => {
+        const pid = batch[idx];
+        if (alias) aliasCacheByProfileId.set(pid, alias);
+      });
+    }
+
+    let result = Array.from(matchesById.values()).map((m) => {
+      const replaceName = (p) => {
+        if (p.is_fs) return p;
+        const alias = aliasCacheByProfileId.get(p.profile_id);
+        if (alias && String(p.name) === String(p.profile_id)) {
+          return { ...p, name: alias };
+        }
+        return p;
+      };
+      return {
+        ...m,
+        teams: {
+          team0: (m.teams?.team0 || []).map(replaceName),
+          team1: (m.teams?.team1 || []).map(replaceName),
+        },
+      };
+    });
+
+    // Refinar nome do mapa via AoE2Insights (limitar 10 partidas)
+    const toRefine = result.slice(0, 10);
+    const refs = await Promise.allSettled(
+      toRefine.map((m) => fetchMapNameFromInsights(m.id))
+    );
+    result = result.map((m, idx) => {
+      const refIdx = idx < refs.length ? idx : -1;
+      if (refIdx >= 0) {
+        const rr = refs[refIdx];
+        if (rr.status === 'fulfilled' && rr.value && typeof rr.value === 'string') {
+          return { ...m, mapname: rr.value };
+        }
+      }
+      return m;
+    });
+
+    // ELO ao lado do nome
+    const collectIds = new Set();
+    result.forEach((m) => {
+      (m.teams?.team0 || []).forEach((p) => collectIds.add(p.profile_id));
+      (m.teams?.team1 || []).forEach((p) => collectIds.add(p.profile_id));
+    });
+    const ids = Array.from(collectIds).slice(0, 80);
+    const ratingsById = new Map();
+    const chunk = 8;
+    for (let i = 0; i < ids.length; i += chunk) {
+      const batch = ids.slice(i, i + chunk);
+      // eslint-disable-next-line no-await-in-loop
+      const stats = await Promise.all(batch.map(async (pid) => {
+        const s = await getPlayerInfo({ profile_id: pid }).catch(() => null);
+        if (!s) return null;
+        return { pid, rating: s?.rm1v1Stats?.rating || 0 };
+      }));
+      stats.forEach((s) => { if (s) ratingsById.set(s.pid, s.rating); });
+    }
+
+    result = result.map((m) => {
+      const applyElo = (p) => {
+        const rating = ratingsById.get(p.profile_id);
+        if (rating && rating > 0) return { ...p, name: `${p.name} (${rating})` };
+        return p;
+      };
+      return {
+        ...m,
+        teams: {
+          team0: (m.teams?.team0 || []).map(applyElo),
+          team1: (m.teams?.team1 || []).map(applyElo),
+        },
+      };
+    });
+
+    // Ordenar por mais recentes (completiontime desc)
+    result.sort((a, b) => (b.completiontime || 0) - (a.completiontime || 0));
     return result;
   } catch (err) {
     return [];

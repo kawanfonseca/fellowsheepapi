@@ -262,6 +262,31 @@ function decodeOptionsCompressed(optionsStr) {
   }
 }
 
+// Cache de nomes de mapa vindos do AoE2Insights por matchId
+const insightsMapNameCache = new Map();
+
+async function fetchMapNameFromInsights(matchId) {
+  const id = Number(matchId);
+  if (!Number.isFinite(id)) return null;
+  if (insightsMapNameCache.has(id)) return insightsMapNameCache.get(id);
+  try {
+    const url = `https://www.aoe2insights.com/match/${id}`;
+    const resp = await axios.get(url, { timeout: 10000, headers: { 'User-Agent': 'FS/1.0' } });
+    const html = String(resp.data || '');
+    // Procurar linha Location -> valor na coluna ao lado
+    let match = html.match(/>\s*Location\s*<\/[^>]+>\s*<td[^>]*>\s*([^<]+?)\s*<\/td>/i);
+    if (!match) {
+      // fallback mais genérico
+      match = html.match(/Location\s*<\/td>\s*<td[^>]*>\s*([^<]+?)\s*<\/td>/i);
+    }
+    const mapName = match ? match[1].trim() : null;
+    if (mapName) insightsMapNameCache.set(id, mapName);
+    return mapName;
+  } catch (_) {
+    return null;
+  }
+}
+
 function getAllPlayersProfileId() {
 	return new Promise(function (resolve, reject) {
 		// Usar path.join para compatibilidade com diferentes sistemas
@@ -731,9 +756,10 @@ async function getFsLiveMatchesInfo() {
       const isEmpire = match.matchtype_id === 9 || match.matchtype_id === 10 ||
         (decodedOptions && /empire/i.test(JSON.stringify(decodedOptions)));
       const is1v1 = (team0.length === 1 && team1.length === 1);
-      const gameType = isEmpire
-        ? (is1v1 ? '1v1 Empire Wars' : 'Team Empire Wars')
-        : (is1v1 ? '1v1 Random Map' : 'Team Random Map');
+      // Pedido: inverter rótulos nos jogos em equipe (Team Empire Wars <-> Team Random Map)
+      const gameType = is1v1
+        ? (isEmpire ? '1v1 Empire Wars' : '1v1 Random Map')
+        : (isEmpire ? 'Team Random Map' : 'Team Empire Wars');
       matchesById.set(matchId, {
         id: matchId,
         mapname,
@@ -762,7 +788,7 @@ async function getFsLiveMatchesInfo() {
     }
 
     // Aplicar aliases resolvidos aos matches
-    const result = Array.from(matchesById.values()).map((m) => {
+    let result = Array.from(matchesById.values()).map((m) => {
       const replaceName = (p) => {
         if (p.is_fs) return p;
         const alias = aliasCacheByProfileId.get(p.profile_id);
@@ -778,6 +804,22 @@ async function getFsLiveMatchesInfo() {
           team1: (m.teams?.team1 || []).map(replaceName),
         },
       };
+    });
+
+    // Refinar nome do mapa via AoE2Insights (quando possível), limitar a 10 consultas por resposta
+    const toRefine = result.slice(0, 10);
+    const refs = await Promise.allSettled(
+      toRefine.map((m) => fetchMapNameFromInsights(m.id))
+    );
+    result = result.map((m, idx) => {
+      const refIdx = idx < refs.length ? idx : -1;
+      if (refIdx >= 0) {
+        const rr = refs[refIdx];
+        if (rr.status === 'fulfilled' && rr.value && typeof rr.value === 'string') {
+          return { ...m, mapname: rr.value };
+        }
+      }
+      return m;
     });
 
     return result;

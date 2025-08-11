@@ -10,6 +10,7 @@ const {
   getFsLiveLeaderboardInfo,
   getFsLiveMatchesInfo,
 } = require("../models/players.models");
+const { getTwitchStreams, getYouTubeStreams, getAllStreams } = require('../models/streams.models');
 
 function getStatus(req, res, next) {
 	res.status(200).json({ server: "Live and listening..." });

@@ -16,6 +16,7 @@ const {
   getFsLiveLeaderboard,
   getFsLiveMatches,
 } = require("./controllers/players.controller");
+const { getTwitchStreams, getYouTubeStreams, getAllStreams } = require('./models/streams.models');
 
 app.use(express.json());
 
@@ -50,6 +51,34 @@ app.get("/api/liveFs1v1", getFsLiveLeaderboard);
 
 // Novo endpoint: partidas em andamento dos membros FS (composição dos times)
 app.get("/api/liveFsMatches", getFsLiveMatches);
+
+// Endpoints de streams
+app.get('/api/streams/twitch', async (req, res) => {
+  try {
+    const data = await getTwitchStreams();
+    res.status(200).json(data);
+  } catch (_) {
+    res.status(200).json([]);
+  }
+});
+
+app.get('/api/streams/youtube', async (req, res) => {
+  try {
+    const data = await getYouTubeStreams();
+    res.status(200).json(data);
+  } catch (_) {
+    res.status(200).json([]);
+  }
+});
+
+app.get('/api/streams', async (req, res) => {
+  try {
+    const data = await getAllStreams();
+    res.status(200).json(data);
+  } catch (_) {
+    res.status(200).json([]);
+  }
+});
 
 // Para desenvolvimento local
 if (process.env.NODE_ENV !== 'production') {

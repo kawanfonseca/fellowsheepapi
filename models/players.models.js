@@ -6,6 +6,12 @@ infoRequest = rateLimit(axios.create(), {
 	perMilliseconds: 50,
 	maxRPS: 40,
 });
+// Cliente com rate limit para histórico de partidas
+const historyRequest = rateLimit(axios.create(), {
+  maxRequests: 2,
+  perMilliseconds: 50,
+  maxRPS: 40,
+});
 
 const fs = require("fs");
 
@@ -37,6 +43,87 @@ function getFSPlayersProfileId() {
         });
     });
 }
+
+// Recupera a lista de profile_ids (IDs do AOE) do arquivo oficial do clã
+function getFSPlayersAoEProfileIds() {
+    return new Promise(function (resolve, reject) {
+        const path = require('path');
+        const filePath = path.join(__dirname, '../database/fs_players.json');
+
+        fs.readFile(filePath, 'utf-8', (err, fileContent) => {
+            if (err) {
+                console.error('Erro ao ler fs_players.json:', err);
+                reject(err);
+                return;
+            }
+
+            try {
+                const players = JSON.parse(fileContent);
+                // Extrair os IDs do AOE (profile_id) válidos (numéricos)
+                const profileIdList = players
+                    .map((p) => (p && p.id ? String(p.id).trim() : ''))
+                    .filter((id) => /^\d+$/.test(id))
+                    .map((id) => Number(id));
+
+                resolve(profileIdList);
+            } catch (parseErr) {
+                console.error('Erro ao parsear fs_players.json:', parseErr);
+                reject(parseErr);
+            }
+        });
+    });
+}
+
+// Utilitário: carrega a lista completa do arquivo fs_players.json
+async function loadFsPlayers() {
+  const path = require('path');
+  const filePath = path.join(__dirname, '../database/fs_players.json');
+  return new Promise((resolve, reject) => {
+    fs.readFile(filePath, 'utf-8', (err, content) => {
+      if (err) return reject(err);
+      try {
+        const list = JSON.parse(content);
+        resolve(Array.isArray(list) ? list : []);
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
+}
+
+// Buscar histórico recente para um jogador (via steam ou profile_id)
+async function fetchRecentMatchForPlayer({ steam, id }) {
+  const url = 'https://aoe-api.worldsedgelink.com/community/leaderboard/getRecentMatchHistory';
+  const params = { title: 'age2' };
+  if (steam && /^\d+$/.test(String(steam))) {
+    params.profile_names = JSON.stringify([`/steam/${steam}`]);
+  } else if (id && /^\d+$/.test(String(id))) {
+    // Algumas rotas aceitam profile_ids, usar como fallback
+    params.profile_ids = JSON.stringify([Number(id)]);
+  } else {
+    return null;
+  }
+
+  const resp = await historyRequest.get(url, { params, timeout: 10000 });
+  const data = resp.data || {};
+  const list = Array.isArray(data.matchHistoryStats) ? data.matchHistoryStats : [];
+  return list.length > 0 ? list[0] : null;
+}
+
+// Detecta se a partida está em andamento: sem completiontime
+function isMatchLive(match) {
+  if (!match) return false;
+  // Considerar sem completiontime ou completiontime = 0 como "ao vivo"
+  return !("completiontime" in match) || !match.completiontime;
+}
+
+// Mapeamento básico de tipos de partida
+const MATCH_TYPE_MAP = {
+  7: '1v1 Random Map',
+  8: 'Team Random Map',
+  9: '1v1 Empire Wars',
+  10: 'Team Empire Wars',
+};
 
 function getAllPlayersProfileId() {
 	return new Promise(function (resolve, reject) {
@@ -385,6 +472,115 @@ async function getAllRankEWInfo() {
   }
 }
 
+// Proxy do leaderboard oficial para filtrar membros do clã (usando profile_id do AOE)
+async function getFsLiveLeaderboardInfo({ leaderboardId = 3, start = 1, count = 200 } = {}) {
+  try {
+    const fsProfileIds = new Set(await getFSPlayersAoEProfileIds());
+
+    const url = 'https://aoe-api.worldsedgelink.com/community/leaderboard/getLeaderBoard2';
+    const params = {
+      leaderboard_id: leaderboardId,
+      platform: 'PC_STEAM',
+      title: 'age2',
+      sortBy: 1,
+      start,
+      count,
+    };
+
+    const response = await axios.get(url, { params, timeout: 10000 });
+    const raw = response.data || {};
+
+    const list = Array.isArray(raw.leaderboard)
+      ? raw.leaderboard
+      : Array.isArray(raw.players)
+        ? raw.players
+        : Array.isArray(raw)
+          ? raw
+          : [];
+
+    const filtered = list.filter((item) => {
+      const profileId = Number(item.profile_id || item.profileId || item.profileid);
+      return Number.isFinite(profileId) && fsProfileIds.has(profileId);
+    });
+
+    // Normalizar saída
+    const normalized = filtered.map((p) => ({
+      profile_id: Number(p.profile_id || p.profileId || p.profileid),
+      name: p.name || p.nickname || p.alias || 'Unknown',
+      rating: Number(p.rating || p.elo || 0),
+      rank: Number(p.rank || p.position || 0),
+      wins: Number(p.wins || 0),
+      losses: Number(p.losses || 0),
+      streak: Number(p.streak || 0),
+      drops: Number(p.drops || 0),
+      highestrating: Number(p.highestrating || p.highest_rating || p.best_rating || p.rating || 0),
+      last_match_time: Number(p.last_match_time || p.lastmatchtime || 0),
+      country: p.country || p.country_code || '',
+    }));
+
+    // Ordenar por rating desc
+    normalized.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+    return normalized;
+  } catch (err) {
+    return [];
+  }
+}
+
+// Agrega partidas em andamento dos membros do clã (via recentMatchHistory)
+async function getFsLiveMatchesInfo() {
+  try {
+    const fsPlayers = await loadFsPlayers();
+    const results = await Promise.allSettled(
+      fsPlayers.map((p) => fetchRecentMatchForPlayer({ steam: p.steam, id: p.id }))
+    );
+
+    const matchesById = new Map();
+
+    results.forEach((res, idx) => {
+      if (res.status !== 'fulfilled') return;
+      const match = res.value;
+      if (!isMatchLive(match)) return;
+
+      const matchId = match.id || match.matchhistory_id;
+      if (!matchId) return;
+
+      // Montar informação básica
+      if (!matchesById.has(matchId)) {
+        const members = Array.isArray(match.matchhistorymember) ? match.matchhistorymember : [];
+        const team0 = members.filter(m => m.teamid === 0).map(m => ({ profile_id: m.profile_id }));
+        const team1 = members.filter(m => m.teamid === 1).map(m => ({ profile_id: m.profile_id }));
+
+        // Decorar nomes para membros FS a partir do arquivo local
+        const idToNick = new Map(fsPlayers.map(fp => [Number(fp.id), fp.nick]));
+        const decorate = (player) => ({
+          profile_id: Number(player.profile_id),
+          name: idToNick.get(Number(player.profile_id)) || String(player.profile_id),
+          is_fs: idToNick.has(Number(player.profile_id)),
+        });
+
+        const gameType = MATCH_TYPE_MAP[match.matchtype_id] || 'Ranked';
+
+        matchesById.set(matchId, {
+          id: matchId,
+          mapname: match.mapname || 'Unknown',
+          matchtype_id: match.matchtype_id,
+          gameType,
+          startgametime: match.startgametime || 0,
+          observertotal: match.observertotal || 0,
+          teams: {
+            team0: team0.map(decorate),
+            team1: team1.map(decorate),
+          },
+        });
+      }
+    });
+
+    return Array.from(matchesById.values());
+  } catch (err) {
+    return [];
+  }
+}
+
 module.exports = {
 	getPlayerInfo,
 	getFSRank1v1Info,
@@ -394,4 +590,6 @@ module.exports = {
 	getAllRank1v1Info,
 	getAllRankTgInfo,
 	getAllRankEWInfo,
+  getFsLiveLeaderboardInfo,
+  getFsLiveMatchesInfo,
 };

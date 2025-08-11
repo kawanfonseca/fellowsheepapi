@@ -7,6 +7,8 @@ const {
 	getAllRank1v1Info,
 	getAllRankTgInfo,
 	getAllRankEWInfo,
+  getFsLiveLeaderboardInfo,
+  getFsLiveMatchesInfo,
 } = require("../models/players.models");
 
 function getStatus(req, res, next) {
@@ -98,6 +100,29 @@ function getAllRankEw(req, res, next) {
 		});
 }
 
+// Proxy + filtro dos membros do clã para partidas/leaderboard em andamento
+async function getFsLiveLeaderboard(req, res, next) {
+  try {
+    const leaderboardId = Number(req.query.leaderboard_id || 3);
+    const start = Number(req.query.start || 1);
+    const count = Number(req.query.count || 200);
+    const data = await getFsLiveLeaderboardInfo({ leaderboardId, start, count });
+    res.status(200).json(data);
+  } catch (err) {
+    res.status(400).json({ error: 'Failed to fetch FS live leaderboard' });
+  }
+}
+
+// Partidas em andamento com composição dos times
+async function getFsLiveMatches(req, res, next) {
+  try {
+    const data = await getFsLiveMatchesInfo();
+    res.status(200).json(data);
+  } catch (err) {
+    res.status(400).json({ error: 'Failed to fetch FS live matches' });
+  }
+}
+
 module.exports = {
 	getStatus,
 	getPlayer,
@@ -108,4 +133,6 @@ module.exports = {
 	getAllRank1v1,
 	getAllRankTg,
 	getAllRankEw,
+  getFsLiveLeaderboard,
+  getFsLiveMatches,
 };

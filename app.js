@@ -13,6 +13,8 @@ const {
 	getAllRank1v1,
 	getAllRankTg,
 	getAllRankEw,
+  getFsLiveLeaderboard,
+  getFsLiveMatches,
 } = require("./controllers/players.controller");
 
 app.use(express.json());
@@ -42,6 +44,12 @@ app.get("/api/rankAll1v1", getAllRank1v1);
 app.get("/api/rankAllTg", getAllRankTg);
 
 app.get("/api/rankAllEw", getAllRankEw);
+
+// Novo endpoint: partidas/leaderboard ao vivo filtradas pelos membros FS
+app.get("/api/liveFs1v1", getFsLiveLeaderboard);
+
+// Novo endpoint: partidas em andamento dos membros FS (composição dos times)
+app.get("/api/liveFsMatches", getFsLiveMatches);
 
 // Para desenvolvimento local
 if (process.env.NODE_ENV !== 'production') {

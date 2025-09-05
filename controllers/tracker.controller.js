@@ -149,6 +149,15 @@ async function getTrackerSummary(req, res) {
     const to = req.query.to ? Number(req.query.to) : undefined;
     const includeDetails = req.query.includeDetails === 'true';
 
+    // Timeout mais agressivo para Vercel (máximo 10 segundos)
+    const isServerless = process.env.VERCEL || process.env.USE_DISK_STORAGE === 'false';
+    const maxTimeout = isServerless ? 9000 : 25000; // 9s para Vercel, 25s para desenvolvimento
+    
+    const startTime = Date.now();
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Request timeout - operação muito lenta')), maxTimeout)
+    );
+
     // Validar parâmetros de tempo
     if (req.query.from && !Number.isFinite(from)) {
       return res.status(400).json({
@@ -164,68 +173,163 @@ async function getTrackerSummary(req, res) {
       });
     }
 
-    const accounts = await loadTrackedAccounts();
-    const allMatches = await readAllMatches({ ladder, from, to });
+    // Executar operação principal com timeout
+    const mainOperation = async () => {
+      const accounts = await loadTrackedAccounts();
+      const allMatches = await readAllMatches({ ladder, from, to });
 
-    // Agrupar por conta
-    const matchesByAccount = {};
-    accounts.forEach(account => {
-      matchesByAccount[account.id] = allMatches.filter(m => m.profile_id === account.id);
-    });
+      // Agrupar por conta
+      const matchesByAccount = {};
+      accounts.forEach(account => {
+        matchesByAccount[account.id] = allMatches.filter(m => m.profile_id === account.id);
+      });
 
-    // Calcular estatísticas
-    const { byAccount: statsByAccount, consolidated } = computeConsolidatedStats(matchesByAccount);
+      // Calcular estatísticas
+      const { byAccount: statsByAccount, consolidated } = computeConsolidatedStats(matchesByAccount);
+      
+      return { accounts, statsByAccount, consolidated };
+    };
+
+    const { accounts, statsByAccount, consolidated } = await Promise.race([
+      mainOperation(),
+      timeoutPromise
+    ]);
 
     // Montar resposta por conta
     const byAccountResponse = [];
 
-    for (const account of accounts) {
-      const accountStats = statsByAccount[account.id] || {
-        volume: { week: 0, month: 0 },
-        rollingAvg: { g10: null, g20: null, g30: null, g50: null, g100: null },
-        percentiles: { p25: null, p50: null, p75: null },
-        delta: { g10: null, g20: null, g30: null },
-        tilt: []
-      };
-
-      const accountData = {
-        profile_id: account.id,
-        volume: accountStats.volume,
-        rollingAvg: accountStats.rollingAvg,
-        percentiles: accountStats.percentiles,
-        delta: accountStats.delta,
-        tilt: accountStats.tilt
-      };
-
-      // Incluir detalhes do jogador se solicitado
-      if (includeDetails) {
+    if (includeDetails) {
+      // Buscar detalhes em paralelo com timeout reduzido para evitar timeout geral
+      const detailsPromises = accounts.map(async (account) => {
         try {
-          const playerInfo = await getPlayerInfo({ profile_id: account.id });
+          // Timeout reduzido para cada chamada individual
+          const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Timeout individual')), 3000)
+          );
+          
+          const playerInfoPromise = getPlayerInfo({ profile_id: account.id });
+          const playerInfo = await Promise.race([playerInfoPromise, timeoutPromise]);
+          
           if (playerInfo && !playerInfo.error) {
-            accountData.player = {
-              nick: playerInfo.nick || account.nick || 'Unknown',
-              country: playerInfo.country || 'unknown',
-              ratingNow: playerInfo.rm1v1Stats?.rating || null
-            };
-          } else {
-            accountData.player = {
-              nick: account.nick || 'Unknown',
-              country: 'unknown',
-              ratingNow: null
+            return {
+              profile_id: account.id,
+              player: {
+                nick: playerInfo.nick || account.nick || 'Unknown',
+                country: playerInfo.country || 'unknown',
+                ratingNow: playerInfo.rm1v1Stats?.rating || null
+              }
             };
           }
         } catch (detailsError) {
           console.warn(`Erro ao buscar detalhes para profile ${account.id}:`, detailsError.message);
-          accountData.player = {
+        }
+        
+        // Fallback para dados básicos
+        return {
+          profile_id: account.id,
+          player: {
             nick: account.nick || 'Unknown',
             country: 'unknown',
             ratingNow: null
-          };
-        }
+          }
+        };
+      });
+
+      // Executar todas as chamadas em paralelo com timeout global (mais conservador para Vercel)
+      const detailsTimeout = isServerless ? 4000 : 8000; // 4s para Vercel, 8s para desenvolvimento
+      const globalTimeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Timeout global para detalhes')), detailsTimeout)
+      );
+
+      let accountDetails = [];
+      try {
+        accountDetails = await Promise.race([
+          Promise.allSettled(detailsPromises),
+          globalTimeoutPromise
+        ]);
+      } catch (globalTimeoutError) {
+        console.warn('Timeout global ao buscar detalhes dos jogadores, usando dados básicos');
+        accountDetails = accounts.map(account => ({
+          status: 'fulfilled',
+          value: {
+            profile_id: account.id,
+            player: {
+              nick: account.nick || 'Unknown',
+              country: 'unknown',
+              ratingNow: null
+            }
+          }
+        }));
       }
 
-      byAccountResponse.push(accountData);
+      // Mapear detalhes por profile_id
+      const detailsMap = new Map();
+      accountDetails.forEach((result, index) => {
+        if (result.status === 'fulfilled' && result.value) {
+          detailsMap.set(result.value.profile_id, result.value.player);
+        } else {
+          // Fallback se a promise falhou
+          const account = accounts[index];
+          detailsMap.set(account.id, {
+            nick: account.nick || 'Unknown',
+            country: 'unknown',
+            ratingNow: null
+          });
+        }
+      });
+
+      // Montar resposta final
+      for (const account of accounts) {
+        const accountStats = statsByAccount[account.id] || {
+          volume: { week: 0, month: 0 },
+          rollingAvg: { g10: null, g20: null, g30: null, g50: null, g100: null },
+          percentiles: { p25: null, p50: null, p75: null },
+          delta: { g10: null, g20: null, g30: null },
+          tilt: []
+        };
+
+        const accountData = {
+          profile_id: account.id,
+          volume: accountStats.volume,
+          rollingAvg: accountStats.rollingAvg,
+          percentiles: accountStats.percentiles,
+          delta: accountStats.delta,
+          tilt: accountStats.tilt,
+          player: detailsMap.get(account.id) || {
+            nick: account.nick || 'Unknown',
+            country: 'unknown',
+            ratingNow: null
+          }
+        };
+
+        byAccountResponse.push(accountData);
+      }
+    } else {
+      // Sem detalhes - resposta rápida
+      for (const account of accounts) {
+        const accountStats = statsByAccount[account.id] || {
+          volume: { week: 0, month: 0 },
+          rollingAvg: { g10: null, g20: null, g30: null, g50: null, g100: null },
+          percentiles: { p25: null, p50: null, p75: null },
+          delta: { g10: null, g20: null, g30: null },
+          tilt: []
+        };
+
+        const accountData = {
+          profile_id: account.id,
+          volume: accountStats.volume,
+          rollingAvg: accountStats.rollingAvg,
+          percentiles: accountStats.percentiles,
+          delta: accountStats.delta,
+          tilt: accountStats.tilt
+        };
+
+        byAccountResponse.push(accountData);
+      }
     }
+
+    const processingTime = Date.now() - startTime;
+    console.log(`Summary processado em ${processingTime}ms (includeDetails: ${includeDetails})`);
 
     res.status(200).json({
       success: true,
@@ -238,6 +342,11 @@ async function getTrackerSummary(req, res) {
           delta: consolidated.delta,
           tilt: consolidated.tilt
         }
+      },
+      meta: {
+        processingTime: processingTime,
+        includeDetails: includeDetails,
+        accountsProcessed: byAccountResponse.length
       },
       timestamp: new Date().toISOString()
     });

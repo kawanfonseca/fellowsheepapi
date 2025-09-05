@@ -8,7 +8,64 @@ const {
   computeCycles
 } = require('../models/tracker.models');
 
-const { getPlayerInfo } = require('../models/players.models');
+const axios = require("axios");
+const rateLimit = require("axios-rate-limit");
+
+// Cliente para WorldsEdgeLink (única API funcional para detalhes)
+const welRequest = rateLimit(axios.create({
+  httpsAgent: new (require('https').Agent)({
+    rejectUnauthorized: false
+  })
+}), {
+  maxRequests: 2,
+  perMilliseconds: 50,
+  maxRPS: 40,
+});
+
+/**
+ * Busca detalhes do jogador via WorldsEdgeLink GetPersonalStat (como no script funcional)
+ * @param {number} profileId 
+ * @returns {Promise<object|null>}
+ */
+async function getPlayerDetailsFromWEL(profileId) {
+  try {
+    const url = 'https://aoe-api.worldsedgelink.com/community/leaderboard/GetPersonalStat';
+    const params = {
+      title: 'age2',
+      profile_ids: JSON.stringify([Number(profileId)])
+    };
+    
+    const response = await welRequest.get(url, { params, timeout: 5000 });
+    const data = response.data || {};
+    
+    if (!data.leaderboardStats || !Array.isArray(data.leaderboardStats)) {
+      return null;
+    }
+    
+    // Buscar stats de 1v1 RM (leaderboard_id = 3)
+    const rm1v1Stats = data.leaderboardStats.find(stat => stat.leaderboard_id === 3);
+    if (!rm1v1Stats) {
+      return null;
+    }
+    
+    // Buscar alias se disponível
+    let nick = 'Unknown';
+    if (data.statGroups && data.statGroups[0] && data.statGroups[0].members && data.statGroups[0].members[0]) {
+      nick = data.statGroups[0].members[0].alias || 'Unknown';
+    }
+    
+    return {
+      nick: nick,
+      country: 'unknown', // WorldsEdgeLink não fornece país facilmente
+      ratingNow: rm1v1Stats.rating || null,
+      maxRating: rm1v1Stats.highestrating || null
+    };
+    
+  } catch (error) {
+    console.warn(`Erro ao buscar detalhes WEL para profile ${profileId}:`, error.message);
+    return null;
+  }
+}
 
 /**
  * POST /api/tracker/pull
@@ -207,16 +264,16 @@ async function getTrackerSummary(req, res) {
             setTimeout(() => reject(new Error('Timeout individual')), 3000)
           );
           
-          const playerInfoPromise = getPlayerInfo({ profile_id: account.id });
+          const playerInfoPromise = getPlayerDetailsFromWEL(account.id);
           const playerInfo = await Promise.race([playerInfoPromise, timeoutPromise]);
           
-          if (playerInfo && !playerInfo.error) {
+          if (playerInfo) {
             return {
               profile_id: account.id,
               player: {
                 nick: playerInfo.nick || account.nick || 'Unknown',
                 country: playerInfo.country || 'unknown',
-                ratingNow: playerInfo.rm1v1Stats?.rating || null
+                ratingNow: playerInfo.ratingNow || null
               }
             };
           }

@@ -11,7 +11,11 @@ const infoRequest = rateLimit(axios.create(), {
   maxRPS: 40,
 });
 
-const historyRequest = rateLimit(axios.create(), {
+const historyRequest = rateLimit(axios.create({
+  httpsAgent: new (require('https').Agent)({
+    rejectUnauthorized: false
+  })
+}), {
   maxRequests: 2,
   perMilliseconds: 50,
   maxRPS: 40,
@@ -129,6 +133,7 @@ function decodeOptionsCompressed(optionsStr) {
 
 /**
  * Busca partidas para um perfil específico via aoe2companion.com (fonte principal)
+ * Baseado no script funcional que usa apenas APIs ativas
  * @param {number} profileId 
  * @param {object} options 
  * @param {number} options.sinceTs - Timestamp em segundos desde quando buscar
@@ -144,13 +149,18 @@ async function pullMatchesForProfile(profileId, { sinceTs } = {}) {
   const matches = [];
 
   try {
-    // 1. Buscar via aoe2companion.com (fonte principal - mais confiável)
+    // 1. Buscar via aoe2companion.com (única fonte confiável funcionando)
     console.log(`Buscando dados via aoe2companion para profile ${pid}...`);
     const companionUrl = `https://data.aoe2companion.com/api/profiles/${pid}`;
 
     const companionResp = await aoe2NetRequest.get(companionUrl, { timeout });
     const companionData = companionResp.data || {};
     
+    if (!companionData || !companionData.ratings) {
+      console.log(`Nenhum dado de ratings encontrado para profile ${pid}`);
+      return { addedCount: 0, matchesNormalized: [] };
+    }
+
     console.log(`aoe2companion retornou dados para profile ${pid}`);
 
     // 2. Extrair histórico de ratings (1v1 RM = leaderboard 0)
@@ -158,14 +168,15 @@ async function pullMatchesForProfile(profileId, { sinceTs } = {}) {
     if (ratingsData && Array.isArray(ratingsData.ratings)) {
       console.log(`Processando ${ratingsData.ratings.length} entradas de rating...`);
       
-      // Filtrar por data se especificado
-      let filteredRatings = ratingsData.ratings;
-      if (sinceTs && Number.isFinite(sinceTs)) {
-        const sinceDate = new Date(sinceTs * 1000).toISOString();
-        filteredRatings = ratingsData.ratings.filter(r => r.date >= sinceDate);
-      }
+      // Aplicar filtro de data limite como no script original
+      const dataLimite = sinceTs ? new Date(sinceTs * 1000).toISOString() : "2023-06-30T23:59:59.000Z";
+      
+      // Filtrar ratings por data (mais recentes primeiro)
+      const filteredRatings = ratingsData.ratings.filter(r => r.date >= dataLimite);
+      
+      console.log(`${filteredRatings.length} ratings após filtro de data`);
 
-      // Converter ratings em matches normalizados
+      // Converter ratings em matches normalizados (seguindo lógica do script)
       for (let i = 0; i < filteredRatings.length; i++) {
         const rating = filteredRatings[i];
         const prevRating = filteredRatings[i + 1]; // Próximo na lista (mais antigo)
@@ -177,46 +188,36 @@ async function pullMatchesForProfile(profileId, { sinceTs } = {}) {
       }
     }
 
-    // 3. Buscar dados adicionais via WorldsEdgeLink se necessário
-    console.log(`Buscando dados complementares via WorldsEdgeLink para profile ${pid}...`);
+    // 3. Buscar dados atuais via WorldsEdgeLink GetPersonalStat (como no script)
+    console.log(`Buscando dados atuais via WorldsEdgeLink para profile ${pid}...`);
     try {
-      const welUrl = 'https://aoe-api.worldsedgelink.com/community/leaderboard/getRecentMatchHistory';
-      const welParams = {
+      const personalStatUrl = 'https://aoe-api.worldsedgelink.com/community/leaderboard/GetPersonalStat';
+      const personalStatParams = {
         title: 'age2',
         profile_ids: JSON.stringify([pid])
       };
 
-      const welResp = await historyRequest.get(welUrl, { 
-        params: welParams, 
+      const personalStatResp = await historyRequest.get(personalStatUrl, { 
+        params: personalStatParams, 
         timeout 
       });
       
-      const welData = welResp.data || {};
-      const welMatches = Array.isArray(welData.matchHistoryStats) ? welData.matchHistoryStats : [];
+      const personalStatData = personalStatResp.data || {};
       
-      console.log(`WorldsEdgeLink retornou ${welMatches.length} matches adicionais`);
-
-      // Processar matches do WorldsEdgeLink para complementar dados
-      for (const match of welMatches) {
-        const normalized = await normalizeWorldsEdgeLinkMatch(match, pid);
-        if (normalized && normalized.ladder === 'rm_1v1') {
-          // Verificar se já temos este match (evitar duplicatas)
-          const existingMatch = matches.find(m => 
-            Math.abs((m.ended_at || 0) - (normalized.ended_at || 0)) < 60 // 1 minuto de tolerância
-          );
+      // Extrair rating atual e máximo (leaderboard_id = 3 para 1v1 RM)
+      if (personalStatData.leaderboardStats && Array.isArray(personalStatData.leaderboardStats)) {
+        const rm1v1Stats = personalStatData.leaderboardStats.find(stat => stat.leaderboard_id === 3);
+        if (rm1v1Stats) {
+          console.log(`Rating atual: ${rm1v1Stats.rating}, Máximo: ${rm1v1Stats.highestrating}`);
           
-          if (!existingMatch) {
-            matches.push(normalized);
-          } else {
-            // Complementar dados do match existente com informações do WorldsEdgeLink
-            existingMatch.map = normalized.map || existingMatch.map;
-            existingMatch.civ = normalized.civ || existingMatch.civ;
-            existingMatch.won = normalized.won !== null ? normalized.won : existingMatch.won;
+          // Atualizar o último match com dados mais precisos se disponível
+          if (matches.length > 0 && rm1v1Stats.rating) {
+            matches[0].rating_after = rm1v1Stats.rating;
           }
         }
       }
     } catch (welErr) {
-      console.warn(`Erro ao buscar dados complementares via WorldsEdgeLink:`, welErr.message);
+      console.warn(`Erro ao buscar dados do WorldsEdgeLink (não crítico):`, welErr.message);
     }
 
     // 4. Ordenar por ended_at (mais recente primeiro)
@@ -241,6 +242,12 @@ async function pullMatchesForProfile(profileId, { sinceTs } = {}) {
 
   } catch (error) {
     console.error(`Erro ao buscar matches para profile ${pid}:`, error.message);
+    
+    // Se for erro 404, é porque o profile não existe no aoe2companion
+    if (error.response && error.response.status === 404) {
+      throw new Error(`Profile ${pid} não encontrado no aoe2companion (verifique se o ID está correto)`);
+    }
+    
     throw new Error(`Falha ao buscar matches para profile ${pid}: ${error.message}`);
   }
 }
@@ -353,68 +360,7 @@ async function normalizeWorldsEdgeLinkMatch(match, profileId) {
   };
 }
 
-/**
- * Normaliza uma partida do aoe2.net
- * @param {object} match 
- * @param {number} profileId 
- * @returns {object|null}
- */
-function normalizeAoe2NetMatch(match, profileId) {
-  if (!match) return null;
-
-  const matchId = match.match_id || match.match_uuid;
-  if (!matchId) return null;
-
-  const startTime = Number(match.started || 0);
-  const endTime = Number(match.finished || 0);
-  
-  // Só considerar partidas finalizadas
-  if (!endTime || endTime <= 0) return null;
-
-  // Verificar se é RM 1v1
-  const leaderboard = Number(match.leaderboard_id || 0);
-  if (leaderboard !== 3) return null; // 3 = RM 1v1
-
-  // Buscar dados do jogador específico
-  const players = Array.isArray(match.players) ? match.players : [];
-  const playerData = players.find(p => Number(p.profile_id) === profileId);
-  
-  if (!playerData) return null;
-
-  // Mapa
-  const mapName = match.map_type || 'Unknown';
-
-  // Civilização
-  let civName = null;
-  if (playerData.civ && Number.isFinite(Number(playerData.civ))) {
-    civName = getCivilizationName(Number(playerData.civ));
-  }
-
-  // Resultado
-  let won = null;
-  if (playerData.won !== undefined) {
-    won = Boolean(playerData.won);
-  }
-
-  // Rating
-  const ratingBefore = Number.isFinite(Number(playerData.rating)) ? Number(playerData.rating) : null;
-  const ratingAfter = Number.isFinite(Number(playerData.rating_change)) && ratingBefore !== null 
-    ? ratingBefore + Number(playerData.rating_change) 
-    : null;
-
-  return {
-    match_id: String(matchId),
-    profile_id: profileId,
-    started_at: startTime,
-    ended_at: endTime,
-    ladder: 'rm_1v1',
-    map: mapName,
-    civ: civName,
-    won: won,
-    rating_before: ratingBefore,
-    rating_after: ratingAfter
-  };
-}
+// Função normalizeAoe2NetMatch removida - aoe2.net não funciona mais
 
 /**
  * Salva matches no disco com merge incremental

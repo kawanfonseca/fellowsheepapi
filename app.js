@@ -19,6 +19,15 @@ const {
 const { getTwitchStreams, getYouTubeStreams, getAllStreams } = require('./models/streams.models');
 const { getFsRecentMatchesInfo } = require('./models/players.models');
 
+// Importar controllers do tracker
+const {
+  postTrackerPull,
+  getTrackerVolume,
+  getTrackerSummary,
+  getTrackerTimeline,
+  getTrackerCycles
+} = require('./controllers/tracker.controller');
+
 app.use(express.json());
 
 app.use(cors());
@@ -90,6 +99,13 @@ app.get('/api/streams', async (req, res) => {
     res.status(200).json([]);
   }
 });
+
+// Rotas do Elo Tracker
+app.post('/api/tracker/pull', postTrackerPull);
+app.get('/api/tracker/volume', getTrackerVolume);
+app.get('/api/tracker/summary', getTrackerSummary);
+app.get('/api/tracker/timeline', getTrackerTimeline);
+app.get('/api/tracker/cycles', getTrackerCycles);
 
 // Para desenvolvimento local
 if (process.env.NODE_ENV !== 'production') {

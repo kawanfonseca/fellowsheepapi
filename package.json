@@ -6,7 +6,8 @@
 	"scripts": {
 		"test": "jest",
 		"dev": "nodemon app.js",
-		"start": "node app.js"
+		"start": "node app.js",
+		"tracker:demo": "node scripts/tracker-demo.js"
 	},
 	"keywords": [],
 	"author": "",

@@ -18,7 +18,11 @@ const historyRequest = rateLimit(axios.create(), {
 });
 
 // Cliente adicional para aoe2.net API com rate limit
-const aoe2NetRequest = rateLimit(axios.create(), {
+const aoe2NetRequest = rateLimit(axios.create({
+  httpsAgent: new (require('https').Agent)({
+    rejectUnauthorized: false // Ignorar certificados auto-assinados
+  })
+}), {
   maxRequests: 3,
   perMilliseconds: 1000,
   maxRPS: 10,
@@ -124,7 +128,7 @@ function decodeOptionsCompressed(optionsStr) {
 }
 
 /**
- * Busca partidas para um perfil específico via WorldsEdgeLink e aoe2.net
+ * Busca partidas para um perfil específico via aoe2companion.com (fonte principal)
  * @param {number} profileId 
  * @param {object} options 
  * @param {number} options.sinceTs - Timestamp em segundos desde quando buscar
@@ -140,101 +144,151 @@ async function pullMatchesForProfile(profileId, { sinceTs } = {}) {
   const matches = [];
 
   try {
-    // 1. Buscar via WorldsEdgeLink recentMatchHistory
-    console.log(`Buscando matches via WorldsEdgeLink para profile ${pid}...`);
-    const welUrl = 'https://aoe-api.worldsedgelink.com/community/leaderboard/getRecentMatchHistory';
-    const welParams = {
-      title: 'age2',
-      profile_ids: JSON.stringify([pid])
-    };
+    // 1. Buscar via aoe2companion.com (fonte principal - mais confiável)
+    console.log(`Buscando dados via aoe2companion para profile ${pid}...`);
+    const companionUrl = `https://data.aoe2companion.com/api/profiles/${pid}`;
 
-    const welResp = await historyRequest.get(welUrl, { 
-      params: welParams, 
-      timeout 
-    });
+    const companionResp = await aoe2NetRequest.get(companionUrl, { timeout });
+    const companionData = companionResp.data || {};
     
-    const welData = welResp.data || {};
-    const welMatches = Array.isArray(welData.matchHistoryStats) ? welData.matchHistoryStats : [];
-    
-    console.log(`WorldsEdgeLink retornou ${welMatches.length} matches`);
+    console.log(`aoe2companion retornou dados para profile ${pid}`);
 
-    // 2. Buscar via aoe2.net para complementar
-    console.log(`Buscando matches via aoe2.net para profile ${pid}...`);
-    const aoe2Url = 'https://aoe2.net/api/player/matches';
-    const aoe2Params = {
-      game: 'aoe2de',
-      profile_id: pid,
-      count: 1000
-    };
-    
-    if (sinceTs && Number.isFinite(sinceTs)) {
-      aoe2Params.since = sinceTs;
+    // 2. Extrair histórico de ratings (1v1 RM = leaderboard 0)
+    const ratingsData = companionData.ratings && companionData.ratings[0];
+    if (ratingsData && Array.isArray(ratingsData.ratings)) {
+      console.log(`Processando ${ratingsData.ratings.length} entradas de rating...`);
+      
+      // Filtrar por data se especificado
+      let filteredRatings = ratingsData.ratings;
+      if (sinceTs && Number.isFinite(sinceTs)) {
+        const sinceDate = new Date(sinceTs * 1000).toISOString();
+        filteredRatings = ratingsData.ratings.filter(r => r.date >= sinceDate);
+      }
+
+      // Converter ratings em matches normalizados
+      for (let i = 0; i < filteredRatings.length; i++) {
+        const rating = filteredRatings[i];
+        const prevRating = filteredRatings[i + 1]; // Próximo na lista (mais antigo)
+        
+        const normalized = normalizeCompanionRating(rating, prevRating, pid, i);
+        if (normalized) {
+          matches.push(normalized);
+        }
+      }
     }
 
-    let aoe2Matches = [];
+    // 3. Buscar dados adicionais via WorldsEdgeLink se necessário
+    console.log(`Buscando dados complementares via WorldsEdgeLink para profile ${pid}...`);
     try {
-      const aoe2Resp = await aoe2NetRequest.get(aoe2Url, { 
-        params: aoe2Params, 
+      const welUrl = 'https://aoe-api.worldsedgelink.com/community/leaderboard/getRecentMatchHistory';
+      const welParams = {
+        title: 'age2',
+        profile_ids: JSON.stringify([pid])
+      };
+
+      const welResp = await historyRequest.get(welUrl, { 
+        params: welParams, 
         timeout 
       });
-      aoe2Matches = Array.isArray(aoe2Resp.data) ? aoe2Resp.data : [];
-      console.log(`aoe2.net retornou ${aoe2Matches.length} matches`);
-    } catch (aoe2Err) {
-      console.warn(`Erro ao buscar via aoe2.net para profile ${pid}:`, aoe2Err.message);
-    }
+      
+      const welData = welResp.data || {};
+      const welMatches = Array.isArray(welData.matchHistoryStats) ? welData.matchHistoryStats : [];
+      
+      console.log(`WorldsEdgeLink retornou ${welMatches.length} matches adicionais`);
 
-    // 3. Normalizar matches do WorldsEdgeLink
-    for (const match of welMatches) {
-      const normalized = await normalizeWorldsEdgeLinkMatch(match, pid);
-      if (normalized && normalized.ladder === 'rm_1v1') {
-        matches.push(normalized);
+      // Processar matches do WorldsEdgeLink para complementar dados
+      for (const match of welMatches) {
+        const normalized = await normalizeWorldsEdgeLinkMatch(match, pid);
+        if (normalized && normalized.ladder === 'rm_1v1') {
+          // Verificar se já temos este match (evitar duplicatas)
+          const existingMatch = matches.find(m => 
+            Math.abs((m.ended_at || 0) - (normalized.ended_at || 0)) < 60 // 1 minuto de tolerância
+          );
+          
+          if (!existingMatch) {
+            matches.push(normalized);
+          } else {
+            // Complementar dados do match existente com informações do WorldsEdgeLink
+            existingMatch.map = normalized.map || existingMatch.map;
+            existingMatch.civ = normalized.civ || existingMatch.civ;
+            existingMatch.won = normalized.won !== null ? normalized.won : existingMatch.won;
+          }
+        }
       }
+    } catch (welErr) {
+      console.warn(`Erro ao buscar dados complementares via WorldsEdgeLink:`, welErr.message);
     }
 
-    // 4. Normalizar matches do aoe2.net
-    for (const match of aoe2Matches) {
-      const normalized = normalizeAoe2NetMatch(match, pid);
-      if (normalized && normalized.ladder === 'rm_1v1') {
-        matches.push(normalized);
-      }
-    }
+    // 4. Ordenar por ended_at (mais recente primeiro)
+    matches.sort((a, b) => (b.ended_at || 0) - (a.ended_at || 0));
 
-    // 5. Remover duplicatas por match_id
-    const uniqueMatches = [];
-    const seenIds = new Set();
-    
-    for (const match of matches) {
-      const id = String(match.match_id);
-      if (!seenIds.has(id)) {
-        seenIds.add(id);
-        uniqueMatches.push(match);
-      }
-    }
+    console.log(`Total de matches processados: ${matches.length}`);
 
-    // 6. Ordenar por started_at (mais recente primeiro)
-    uniqueMatches.sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
-
-    console.log(`Total de matches únicos normalizados: ${uniqueMatches.length}`);
-
-    // 7. Persistência
+    // 5. Persistência
     const useDiskStorage = process.env.USE_DISK_STORAGE !== 'false';
     let addedCount = 0;
 
     if (useDiskStorage) {
-      addedCount = await saveMatchesToDisk(pid, uniqueMatches);
+      addedCount = await saveMatchesToDisk(pid, matches);
     } else {
-      addedCount = uniqueMatches.length;
+      addedCount = matches.length;
     }
 
     return {
       addedCount,
-      matchesNormalized: uniqueMatches
+      matchesNormalized: matches
     };
 
   } catch (error) {
     console.error(`Erro ao buscar matches para profile ${pid}:`, error.message);
     throw new Error(`Falha ao buscar matches para profile ${pid}: ${error.message}`);
   }
+}
+
+/**
+ * Normaliza uma entrada de rating do aoe2companion.com
+ * @param {object} rating - Entrada atual de rating
+ * @param {object} prevRating - Entrada anterior de rating (mais antiga)
+ * @param {number} profileId 
+ * @param {number} index - Índice na lista
+ * @returns {object|null}
+ */
+function normalizeCompanionRating(rating, prevRating, profileId, index) {
+  if (!rating || !rating.date || !Number.isFinite(rating.rating)) {
+    return null;
+  }
+
+  // Converter data ISO para timestamp Unix
+  const endedAt = Math.floor(new Date(rating.date).getTime() / 1000);
+  
+  // Estimar started_at (assumir partida de ~30 minutos antes)
+  const startedAt = endedAt - (30 * 60);
+
+  // Rating antes e depois
+  const ratingAfter = rating.rating;
+  const ratingBefore = prevRating ? prevRating.rating : ratingAfter;
+
+  // Determinar resultado baseado na mudança de rating
+  let won = null;
+  if (ratingAfter !== ratingBefore) {
+    won = ratingAfter > ratingBefore;
+  }
+
+  // ID único baseado no timestamp e profile
+  const matchId = `companion_${profileId}_${endedAt}_${index}`;
+
+  return {
+    match_id: matchId,
+    profile_id: profileId,
+    started_at: startedAt,
+    ended_at: endedAt,
+    ladder: 'rm_1v1',
+    map: 'Unknown', // aoe2companion não fornece mapa
+    civ: null, // aoe2companion não fornece civilização
+    won: won,
+    rating_before: ratingBefore,
+    rating_after: ratingAfter
+  };
 }
 
 /**

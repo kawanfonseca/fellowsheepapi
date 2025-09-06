@@ -543,7 +543,7 @@ async function getTrackerCycles(req, res) {
 /**
  * GET /api/tracker/player/:profileId/history
  * Retorna histórico completo de um jogador específico
- * Query params: ?from=<epoch>&to=<epoch>&limit=<number>&sort=asc|desc
+ * Query params: ?from=<epoch>&to=<epoch>&limit=<number>&sort=asc|desc&ladder=<ladder>
  */
 async function getPlayerHistory(req, res) {
   try {
@@ -553,6 +553,7 @@ async function getPlayerHistory(req, res) {
     const to = req.query.to ? Number(req.query.to) : undefined;
     const limit = req.query.limit ? Number(req.query.limit) : undefined;
     const sortOrder = req.query.sort === 'asc' ? 'asc' : 'desc';
+    const ladder = req.query.ladder || 'rm_1v1';
 
     if (!Number.isFinite(pid)) {
       return res.status(400).json({
@@ -562,7 +563,7 @@ async function getPlayerHistory(req, res) {
     }
 
     // Carregar matches do jogador
-    const allMatches = await readAllMatches({ ladder: 'rm_1v1', from, to });
+    const allMatches = await readAllMatches({ ladder, from, to });
     const playerMatches = allMatches.filter(m => m.profile_id === pid);
 
     // Aplicar limite se especificado

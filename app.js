@@ -25,7 +25,8 @@ const {
   getTrackerVolume,
   getTrackerSummary,
   getTrackerTimeline,
-  getTrackerCycles
+  getTrackerCycles,
+  getPlayerHistory
 } = require('./controllers/tracker.controller');
 
 app.use(express.json());
@@ -106,6 +107,7 @@ app.get('/api/tracker/volume', getTrackerVolume);
 app.get('/api/tracker/summary', getTrackerSummary);
 app.get('/api/tracker/timeline', getTrackerTimeline);
 app.get('/api/tracker/cycles', getTrackerCycles);
+app.get('/api/tracker/player/:profileId/history', getPlayerHistory);
 
 // Para desenvolvimento local
 if (process.env.NODE_ENV !== 'production') {
